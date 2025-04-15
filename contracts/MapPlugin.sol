@@ -52,14 +52,14 @@ interface IRewardVault {
 /**
  * @title VaultToken
  * @notice This is a simple ERC20 token used by the MapPlugin to represent staked positions.
- *         Whenever a user places pixels, an equivalent amount of VaultToken is minted and
- *         staked into the RewardVault. When pixels are overwritten, these tokens are burned.
+ *         Whenever a user composes notes, an equivalent amount of VaultToken is minted and
+ *         staked into the RewardVault. When notes are overwritten, these tokens are burned.
  */
 contract VaultToken is ERC20, Ownable {
     /**
-     * @notice Initializes the ERC20 with a name ("BentoBera") and symbol ("BentoBera").
+     * @notice Initializes the ERC20 with a name ("BeatConnect") and symbol ("BEAT").
      */
-    constructor() ERC20("BentoBera", "BentoBera") {}
+    constructor() ERC20("BeatConnect", "BEAT") {}
 
     /**
      * @dev Mints `amount` tokens to the `to` address. Restricted to the contract owner (MapPlugin).
@@ -82,11 +82,11 @@ contract VaultToken is ERC20, Ownable {
 
 /**
  * @title MapPlugin
- * @notice This contract represents the BentoBera onchain pixel grid as a Beradrome plugin.
- *         - Players place or overwrite pixels by paying BERA (token).
- *         - Staking logic is handled via a Gauge and a specialized RewardVault.
- *         - Factions can be created, and each pixel is assigned to exactly one faction.
- *         - The contract distributes fees for bribes, treasury, and faction ownership.
+ * @notice This contract represents the BeatConnect music sequencer as a Beradrome plugin.
+ *         - Users compose music by setting note velocities in slots
+ *         - Each slot can have a velocity from 0 (off) to 127 (max intensity)
+ *         - Staking logic is handled via a Gauge and a specialized RewardVault
+ *         - The contract distributes fees for bribes, treasury, and development
  */
 contract MapPlugin is ReentrancyGuard, Ownable {
     using SafeERC20 for IERC20;
@@ -98,21 +98,21 @@ contract MapPlugin is ReentrancyGuard, Ownable {
      */
     uint256 public constant DURATION = 7 days;
     /**
-     * @dev Each pixel placed in the grid increments the staked amount by 1 (AMOUNT = 1).
-     *      This can be seen as a “unit stake” for each pixel.
+     * @dev Each composed note in the grid increments the staked amount by 1 (AMOUNT = 1).
+     *      This represents a single note placement in the sequencer.
      */
     uint256 public constant AMOUNT = 1;
 
     /**
-     * @notice Display strings to identify the plugin’s protocol and name.
+     * @notice Display strings to identify the plugin's protocol and name.
      */
-    string public constant PROTOCOL = "Future Girls Inc";
-    string public constant NAME = "BentoBera";  
+    string public constant PROTOCOL = "BabyBera";
+    string public constant NAME = "Beat Connect";  
 
     /*----------  STATE VARIABLES  --------------------------------------*/
 
     /**
-     * @notice The ERC20 token used to pay for placing pixels (likely WBERA).
+     * @notice The ERC20 token used to pay for composing music (likely WBERA).
      */
     IERC20 private immutable token;
     /**
@@ -126,7 +126,7 @@ contract MapPlugin is ReentrancyGuard, Ownable {
      */
     address private immutable voter;
     /**
-     * @notice The gauge contract address where staked amounts (pixels) earn oBERO rewards.
+     * @notice The gauge contract address where staked amounts (notes) earn oBERO rewards.
      */
     address private gauge;
     /**
@@ -135,7 +135,7 @@ contract MapPlugin is ReentrancyGuard, Ownable {
     address private bribe;
 
     /**
-     * @notice The VaultToken contract used to represent staked positions (minted/burned on pixel place/overwrite).
+     * @notice The VaultToken contract used to represent staked positions (minted/burned on note composition/overwrite).
      */
     address private vaultToken;
     /**
@@ -166,23 +166,19 @@ contract MapPlugin is ReentrancyGuard, Ownable {
      */
     address public incentives;
     /**
-     * @notice The maximum index allowed for placing pixels (initially 100, can be extended).
-     *         If `capacity = 100`, valid pixel indexes are from 0 to 99, for instance.
+     * @notice The maximum index allowed for composing notes (initially 100, can be extended).
+     *         If `capacity = 100`, valid slot indexes are from 0 to 99, for instance.
      */
     uint256 public capacity = 100;
     /**
-     * @notice The cost to place or overwrite a single pixel in BERA terms.
+     * @notice The cost to compose a single note in BERA terms.
      */
-    uint256 public placePrice = 0.01 ether;
+    uint256 public composePrice = 0.01 ether;
     /**
-     * @notice The highest assigned faction index, incremented each time a new faction is created.
+     * @notice The total number of notes composed.
+     *         Summation of all composed notes across all addresses.
      */
-    uint256 public factionMax;
-    /**
-     * @notice The total number of pixel placements on the board. 
-     *         Summation of all placed pixels across all addresses/factions.
-     */
-    uint256 public totalPlaced;
+    uint256 public totalComposed;
     /**
      * @notice Whether bribe distribution is automatically handled by the contract.
      *         If true, the majority of fees are directly sent to the bribe contract.
@@ -194,86 +190,46 @@ contract MapPlugin is ReentrancyGuard, Ownable {
     bool public activeIncentives = false;
 
     /**
-     * @notice Represents a single pixel on the grid.
-     * @param account The user who currently owns/placed this pixel.
-     * @param faction The faction ID that the pixel belongs to.
-     * @param color   A string representing the pixel color in #RRGGBB format.
+     * @notice Represents a single slot on the grid.
+     * @param account The user who currently owns/composed this slot.
+     * @param velocity The velocity of the slot.
      */
-    struct Pixel {
+    struct Slot {
         address account;
-        uint256 faction;
-        string color;
+        uint256 velocity;
     }
 
     /**
-     * @notice Represents a faction that can hold pixels.
-     * @param owner   The address controlling this faction (e.g., a guild leader).
-     * @param balance The total staked pixels controlled by this faction (for reward calculations).
-     * @param placed  The lifetime total of placed pixels associated with this faction.
-     * @param isActive Whether the faction is active or not.
+     * @notice index => Slot data. 
+     *         Where index is the slot ID (0..capacity-1).
      */
-    struct Faction {
-        address owner;
-        uint256 balance;
-        uint256 placed;
-        bool isActive;
-    }
+    mapping(uint256 => Slot) public index_Slot;
 
     /**
-     * @notice index => Pixel data. 
-     *         Where index is the pixel ID (0..capacity-1).
+     * @notice Maps each address to the total number of notes they have composed.
      */
-    mapping(uint256 => Pixel) public index_Pixel;
-
-    /**
-     * @notice faction ID => Faction struct
-     */
-    mapping(uint256 => Faction) public index_Faction;
-    /**
-     * @notice Maps a faction owner’s address to their faction ID. 
-     *         Useful to quickly find which faction they control.
-     */
-    mapping(address => uint256) public factionOwner_Index;
-
-    /**
-     * @notice Maps each address to the total number of pixels they have placed on the board.
-     */
-    mapping(address => uint256) public account_Placed;
-
-    /**
-     * @notice Tracks how many pixels each user has contributed to a particular faction’s balance.
-     */
-    mapping(address => mapping(uint256 => uint256)) public account_Faction_Balance;
-    /**
-     * @notice Tracks how many pixels each user has placed historically for a particular faction.
-     */
-    mapping(address => mapping(uint256 => uint256)) public account_Faction_Placed;
+    mapping(address => uint256) public account_Composed;
 
     /*----------  ERRORS ------------------------------------------------*/
 
-    error Plugin__InvalidFaction();
-    error Plugin__FactionInactive();
-    error Plugin__InvalidColor();
     error Plugin__InvalidIndex();
     error Plugin__InvalidZeroInput();
-    error Plugin__NotAuthorizedVoter();
-    error Plugin__InvalidCapacity();
+    error Plugin__InvalidLength();
     error Plugin__InvalidZeroAddress();
     error Plugin__NotAuthorizedDeveloper();
+    error Plugin__NotAuthorizedVoter();
+    error Plugin__InvalidCapacity();
 
     /*----------  EVENTS ------------------------------------------------*/
 
-    event Plugin__Placed(
+    event Plugin__Composed(
         address indexed account,
-        uint256 faction,
         uint256 index,
-        string color
+        uint256 velocity
     );
     event Plugin__ClaimedAndDistributed(uint256 bribeAmount, uint256 incentivesAmount, uint256 developerAmount, uint256 treasuryAmount);
-    event Plugin__PlacePriceSet(uint256 placePrice);
+    event Plugin__ComposePriceSet(uint256 composePrice);
     event Plugin__CapacitySet(uint256 capacity);
-    event Plugin__FactionCreated(uint256 faction);
-    event Plugin__FactionActiveSet(uint256 faction, bool isActive);
     event Plugin__ActiveBribesSet(bool activeBribes);
     event Plugin__ActiveIncentivesSet(bool activeIncentives);
     event Plugin__TreasurySet(address treasury);
@@ -290,19 +246,19 @@ contract MapPlugin is ReentrancyGuard, Ownable {
     /*----------  FUNCTIONS  --------------------------------------------*/
 
     /**
-     * @notice Deploy the MapPlugin contract that acts as a Beradrome plugin for BentoBera.
+     * @notice Deploy the MapPlugin contract that acts as a Beradrome plugin for BeatConnect.
      * @param _token The main token used for payment (WBERA).
      * @param _voter The Beradrome Voter contract address.
      * @param _assetTokens Typically an array containing [WBERA].
      * @param _bribeTokens Typically an array containing [WBERA].
-     * @param _treasury The address of BentoBera's treasury.
+     * @param _treasury The address of BeatConnect's treasury.
      * @param _vaultFactory The Berachain RewardVault factory that creates a specialized vault for this plugin.
      */
     constructor(
-        address _token, // WBERA
+        address _token,
         address _voter,
-        address[] memory _assetTokens, // [WBERA]
-        address[] memory _bribeTokens, // [WBERA]
+        address[] memory _assetTokens,
+        address[] memory _bribeTokens,
         address _treasury,
         address _developer,
         address _vaultFactory
@@ -321,17 +277,11 @@ contract MapPlugin is ReentrancyGuard, Ownable {
     }
 
     /**
-     * @notice Distributes accumulated BERA fees (95% of total placement fees):
+     * @notice Distributes accumulated BERA fees from music composition:
      *         - 42% to bribes if activeBribes is true, otherwise to incentives
      *         - 42% to incentives if activeIncentives is true, otherwise to bribes
      *         - 8% to developer
-     *         - 8% to treasury (remaining balance)
-     * @dev Final distribution of total fees:
-     *      - 5% to faction owner (taken during placement)
-     *      - 39.9% to bribes
-     *      - 39.9% to incentives
-     *      - 7.6% to developer
-     *      - 7.6% to treasury
+     *         - 8% to treasury
      */
     function claimAndDistribute() external nonReentrant {
         uint256 balance = token.balanceOf(address(this));
@@ -366,55 +316,41 @@ contract MapPlugin is ReentrancyGuard, Ownable {
     }
 
     /**
-     * @notice Allows a user (or a proxy) to place multiple pixels for a given faction in a single transaction.
-     *         This can overwrite existing pixels, removing the previous owner’s stake from the gauge.
-     * @param account The address that will effectively own the placed pixels.
-     * @param faction The faction ID under which these pixels are placed.
-     * @param color   The color in #RRGGBB format for the pixels.
-     * @param indexes An array of pixel indexes the user wants to claim or overwrite.
+     * @notice Allows a user (or a proxy) to compose multiple notes in a single transaction.
+     *         This can overwrite existing notes, removing the previous owner's stake from the gauge.
+     * @param account The address that will effectively own the composed notes.
+     * @param indexes An array of note indexes the user wants to claim or overwrite.
+     * @param velocities An array of velocities for the notes.
      */
-    function placeFor(
+    function composeFor(
         address account,
-        uint256 faction,
-        string calldata color,
-        uint256[] calldata indexes
+        uint256[] calldata indexes,
+        uint256[] calldata velocities
     ) external nonReentrant {
-        if (faction == 0 || faction > factionMax) revert Plugin__InvalidFaction();
-        if (!index_Faction[faction].isActive) revert Plugin__FactionInactive();
         if (indexes.length == 0) revert Plugin__InvalidZeroInput();
-        if (!validateColorFormat(color)) revert Plugin__InvalidColor();
+        if (indexes.length != velocities.length) revert Plugin__InvalidLength();
 
         for (uint256 i = 0; i < indexes.length; i++) {
             if (indexes[i] >= capacity) revert Plugin__InvalidIndex();
 
-            Pixel memory prevPixel = index_Pixel[indexes[i]];
-            index_Pixel[indexes[i]] = Pixel(account, faction, color);
+            Slot memory prevSlot = index_Slot[indexes[i]];
+            index_Slot[indexes[i]] = Slot(account, velocities[i]);
 
-            if (prevPixel.account != address(0)) {
-
-                index_Faction[prevPixel.faction].balance -= AMOUNT;
-                account_Faction_Balance[prevPixel.account][prevPixel.faction] -= AMOUNT;
-
-                IGauge(gauge)._withdraw(prevPixel.account, AMOUNT);
-                IRewardVault(rewardVault).delegateWithdraw(prevPixel.account, AMOUNT);
+            if (prevSlot.account != address(0)) {
+                IGauge(gauge)._withdraw(prevSlot.account, AMOUNT);
+                IRewardVault(rewardVault).delegateWithdraw(prevSlot.account, AMOUNT);
                 VaultToken(vaultToken).burn(address(this), AMOUNT);
             }
-            emit Plugin__Placed(account, faction, indexes[i], color);
+            emit Plugin__Composed(account, indexes[i], velocities[i]);
         }
 
         uint256 amount = AMOUNT * indexes.length;
-        uint256 cost = placePrice * indexes.length;
-        uint256 fee = cost / 20;
+        uint256 cost = composePrice * indexes.length;
 
-        totalPlaced += amount;
-        account_Placed[account] += amount;
-        index_Faction[faction].balance += amount;
-        account_Faction_Balance[account][faction] += amount;
-        index_Faction[faction].placed += amount;
-        account_Faction_Placed[account][faction] += amount;
+        totalComposed += amount;
+        account_Composed[account] += amount;
 
-        token.safeTransferFrom(msg.sender, index_Faction[faction].owner, fee);
-        token.safeTransferFrom(msg.sender, address(this), cost - fee);
+        token.safeTransferFrom(msg.sender, address(this), cost);
 
         IGauge(gauge)._deposit(account, amount);
         VaultToken(vaultToken).mint(address(this), amount);
@@ -424,27 +360,6 @@ contract MapPlugin is ReentrancyGuard, Ownable {
     }
 
     /*----------  RESTRICTED FUNCTIONS  ---------------------------------*/
-
-    /**
-     * @notice Owner can create a new faction, assigning an owner address.
-     * @param _owner The address controlling the new faction.
-     */
-    function createFaction(address _owner) external onlyOwner {
-        factionMax++;
-        index_Faction[factionMax] = Faction(_owner, 0, 0, true);
-        factionOwner_Index[_owner] = factionMax;
-        emit Plugin__FactionCreated(factionMax);
-    }
-
-    /**
-     * @notice Owner can toggle the active status of a faction (preventing new pixels from being placed under it if inactive).
-     * @param _faction The faction ID.
-     * @param _isActive True to activate, false to deactivate.
-     */
-    function setFactionActive(uint256 _faction, bool _isActive) external onlyOwner {
-        index_Faction[_faction].isActive = _isActive;
-        emit Plugin__FactionActiveSet(_faction, _isActive);
-    }
 
     /**
      * @notice Owner can enable/disable auto-bribe (where fees are sent to the bribe contract instead of the treasury).
@@ -465,16 +380,16 @@ contract MapPlugin is ReentrancyGuard, Ownable {
     }
 
     /**
-     * @notice Owner can set the price (in BERA) required to place a single pixel.
-     * @param _placePrice The new price per pixel.
+     * @notice Owner can set the price (in BERA) required to compose a single note.
+     * @param _composePrice The new price per note.
      */
-    function setPlacePrice(uint256 _placePrice) external onlyOwner {
-        placePrice = _placePrice;
-        emit Plugin__PlacePriceSet(placePrice);
+    function setComposePrice(uint256 _composePrice) external onlyOwner {
+        composePrice = _composePrice;
+        emit Plugin__ComposePriceSet(composePrice);
     }
 
     /**
-     * @notice Owner can expand the capacity of the grid, allowing higher pixel indices.
+     * @notice Owner can expand the capacity of the sequencer, allowing more notes.
      * @param _capacity The new maximum grid capacity.
      */
     function setCapacity(uint256 _capacity) external onlyOwner {
@@ -526,34 +441,11 @@ contract MapPlugin is ReentrancyGuard, Ownable {
         bribe = _bribe;
     }
 
-    /**
-     * @dev Validates that a string is in the "#RRGGBB" hex format.
-     *      Used to prevent spamming arbitrary data as color.
-     * @param color The color string.
-     * @return True if valid format, false otherwise.
-     */
-    function validateColorFormat(string memory color) internal pure returns (bool) {
-        bytes memory colorBytes = bytes(color);
-        if (colorBytes.length != 7) return false; // "#RRGGBB" format
-        if (colorBytes[0] != '#') return false;
-        
-        for (uint i = 1; i < 7; i++) {
-            bytes1 char = colorBytes[i];
-            bool isHexDigit = (
-                (char >= '0' && char <= '9') ||
-                (char >= 'a' && char <= 'f') ||
-                (char >= 'A' && char <= 'F')
-            );
-            if (!isHexDigit) return false;
-        }
-        return true;
-    }
-
     /*----------  VIEW FUNCTIONS  ---------------------------------------*/
 
     /**
      * @notice Returns the staked balance of a specific user in the gauge.
-     * @param account The user’s address.
+     * @param account The user's address.
      * @return The gauge balance of that user.
      */
     function balanceOf(address account) public view returns (uint256) {
@@ -568,21 +460,21 @@ contract MapPlugin is ReentrancyGuard, Ownable {
     }
 
     /**
-     * @return Address of the ERC20 token used to pay for pixel placements.
+     * @return Address of the ERC20 token used to pay for composing music.
      */
     function getToken() public view returns (address) {
         return address(token);
     }
 
     /**
-     * @return The plugin’s protocol name (for front-end display).
+     * @return The plugin's protocol name (for front-end display).
      */
     function getProtocol() public view virtual returns (string memory) {
         return PROTOCOL;
     }
 
     /**
-     * @return The plugin’s name (for front-end display).
+     * @return The plugin's name (for front-end display).
      */
     function getName() public view virtual returns (string memory) {
         return NAME;
@@ -596,7 +488,7 @@ contract MapPlugin is ReentrancyGuard, Ownable {
     }
 
     /**
-     * @return The gauge address used for staking pixel amounts.
+     * @return The gauge address used for staking note positions.
      */
     function getGauge() public view returns (address) {
         return gauge;
@@ -636,43 +528,30 @@ contract MapPlugin is ReentrancyGuard, Ownable {
     function getRewardVault() public view returns (address) {
         return rewardVault;
     }
-    
+
     /**
-     * @notice Retrieves a faction’s details.
-     * @param _faction The faction ID.
-     * @return owner    The faction owner’s address.
-     * @return balance  Current stake count (active pixels) for this faction.
-     * @return placed   Total lifetime pixel count assigned to this faction.
-     * @return isActive Whether the faction is open for new pixel placements.
+     * @notice Retrieves details of a single note on the board.
+     * @param index Note index in [0..capacity-1].
+     * @return account The user who owns the note.
+     * @return velocity The velocity of the note.
      */
-    function getFaction(uint256 _faction) public view returns (address owner, uint256 balance, uint256 placed, bool isActive) {
-        return (index_Faction[_faction].owner, index_Faction[_faction].balance, index_Faction[_faction].placed, index_Faction[_faction].isActive);
+    function getSlot(uint256 index) public view returns (address account, uint256 velocity) {
+        Slot memory slot = index_Slot[index];
+        return (slot.account, slot.velocity); 
     }
 
     /**
-     * @notice Retrieves details of a single pixel on the board.
-     * @param index Pixel index in [0..capacity-1].
-     * @return account The user who owns the pixel.
-     * @return faction The faction ID of the pixel.
-     * @return color   The color string in #RRGGBB format.
+     * @notice Retrieves a batch of slots from startIndex to endIndex (inclusive).
+     * @param startIndex The first slot index in the range.
+     * @param endIndex   The last slot index in the range.
+     * @return An array of Slot structs for [startIndex..endIndex].
      */
-    function getPixel(uint256 index) public view returns (address account, uint256 faction, string memory color) {
-        Pixel memory pixel = index_Pixel[index];
-        return (pixel.account, pixel.faction, pixel.color); 
-    }
-
-    /**
-     * @notice Retrieves a batch of pixels from startIndex to endIndex (inclusive).
-     * @param startIndex The first pixel index in the range.
-     * @param endIndex   The last pixel index in the range.
-     * @return An array of Pixel structs for [startIndex..endIndex].
-     */
-    function getPixels(uint256 startIndex, uint256 endIndex) public view returns (Pixel[] memory) {
-        Pixel[] memory pixels = new Pixel[](endIndex - startIndex + 1);
-        for (uint256 i = 0; i < pixels.length; i++) {
-            pixels[i] = index_Pixel[startIndex + i];
+    function getSlots(uint256 startIndex, uint256 endIndex) public view returns (Slot[] memory) {
+        Slot[] memory slots = new Slot[](endIndex - startIndex + 1);
+        for (uint256 i = 0; i < slots.length; i++) {
+            slots[i] = index_Slot[startIndex + i];
         }
-        return pixels;
+        return slots;
     }
     
 }
